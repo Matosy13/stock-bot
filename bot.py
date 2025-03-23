@@ -17,13 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 load_dotenv()
-DOWNLOAD_DIR = "C:\\Users\\Максим\\Documents\\Остатки ЕГАИС"
 NOTIFY_CHAT_ID = "-1002260669289"  # ID группы для уведомлений
 ADMIN_ID = int(os.getenv("ADMIN_ID"))  # ID администратора из .env
 PRODUCTS_FILE = "products.json"  # Файл для хранения списка продуктов
-
-#if not os.path.exists(DOWNLOAD_DIR):
-#    os.makedirs(DOWNLOAD_DIR)
 
 sheet = setup_google_sheets()
 
@@ -33,6 +29,10 @@ def load_products():
         if os.path.exists(PRODUCTS_FILE):
             with open(PRODUCTS_FILE, 'r', encoding='utf-8') as f:
                 products = json.load(f)
+                # Добавляем threshold, если его нет
+                for product in products:
+                    if "threshold" not in product:
+                        product["threshold"] = 10  # Значение по умолчанию
                 logger.info(f"Продукты загружены из {PRODUCTS_FILE}")
                 return products
         else:
@@ -75,6 +75,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Добавить товар", callback_data='admin_add')],
             [InlineKeyboardButton("Удалить товар", callback_data='admin_remove')],
             [InlineKeyboardButton("Список товаров", callback_data='admin_list')],
+            [InlineKeyboardButton("Изменить порог", callback_data='admin_edit_threshold')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         logger.info(f"Отправка сообщения в чат {update.effective_chat.id}")
@@ -90,11 +91,22 @@ async def show_admin_panel(chat_id, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Добавить товар", callback_data='admin_add')],
             [InlineKeyboardButton("Удалить товар", callback_data='admin_remove')],
             [InlineKeyboardButton("Список товаров", callback_data='admin_list')],
+            [InlineKeyboardButton("Изменить порог", callback_data='admin_edit_threshold')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(chat_id, "Панель администратора:", reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Ошибка в show_admin_panel: {e}")
+
+# Команда редактирования порога
+async def handle_edit_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer()
+        context.user_data['admin_state'] = 'edit_threshold_code'
+        await query.message.reply_text("Введите код товара, для которого хотите изменить порог (например, 999):")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_edit_threshold: {e}")
 
 # Команда добавления товара (через кнопки)
 async def handle_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,7 +135,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(update.effective_chat.id, "Список товаров пуст.")
             return
         
-        products_text = "Текущий список товаров:\n" + "\n".join([f"{p['short_name']} ({p['code']})" for p in PRODUCTS])
+        products_text = "Текущий список товаров:\n" + "\n".join([f"{p['short_name']} ({p['code']}), Порог: {p['threshold']}" for p in PRODUCTS])
         await context.bot.send_message(update.effective_chat.id, products_text)
     except Exception as e:
         logger.error(f"Ошибка в list_products: {e}")
@@ -144,17 +156,31 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("Введите название товара (например, Апельсин):")
         
         elif state == 'add_name':
+            context.user_data['new_product_name'] = text
+            context.user_data['admin_state'] = 'add_threshold'
+            await update.message.reply_text("Введите минимальный порог остатка для товара (например, 10):")
+        
+        elif state == 'add_threshold':
             code = context.user_data['new_product_code']
-            short_name = text
+            short_name = context.user_data['new_product_name']
+            try:
+                threshold = int(text)
+                if threshold < 0:
+                    raise ValueError("Порог не может быть отрицательным")
+            except ValueError:
+                await update.message.reply_text("Пожалуйста, введите корректное число для порога (например, 10):")
+                return
+            
             if any(p["code"] == code for p in PRODUCTS):
                 await update.message.reply_text(f"Товар с кодом {code} уже существует.")
             else:
-                PRODUCTS.append({"code": code, "short_name": short_name})
+                PRODUCTS.append({"code": code, "short_name": short_name, "threshold": threshold})
                 save_products(PRODUCTS)
-                await update.message.reply_text(f"Товар добавлен: {short_name} ({code})")
-                logger.info(f"Добавлен товар: {code} - {short_name}")
+                await update.message.reply_text(f"Товар добавлен: {short_name} ({code}), Порог: {threshold}")
+                logger.info(f"Добавлен товар: {code} - {short_name}, Порог: {threshold}")
             context.user_data.pop('admin_state', None)
             context.user_data.pop('new_product_code', None)
+            context.user_data.pop('new_product_name', None)
             await show_admin_panel(chat_id, context)
         
         elif state == 'remove_code':
@@ -168,6 +194,38 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 await update.message.reply_text(f"Товар с кодом {code} не найден.")
             context.user_data.pop('admin_state', None)
+            await show_admin_panel(chat_id, context)
+        
+        elif state == 'edit_threshold_code':
+            code = text
+            product = next((p for p in PRODUCTS if p["code"] == code), None)
+            if not product:
+                await update.message.reply_text(f"Товар с кодом {code} не найден.")
+                context.user_data.pop('admin_state', None)
+                await show_admin_panel(chat_id, context)
+                return
+            context.user_data['edit_product_code'] = code
+            context.user_data['admin_state'] = 'edit_threshold_value'
+            await update.message.reply_text(f"Введите новый порог для товара {product['short_name']} ({code}) (текущий порог: {product['threshold']}):")
+        
+        elif state == 'edit_threshold_value':
+            code = context.user_data['edit_product_code']
+            try:
+                threshold = int(text)
+                if threshold < 0:
+                    raise ValueError("Порог не может быть отрицательным")
+            except ValueError:
+                await update.message.reply_text("Пожалуйста, введите корректное число для порога (например, 10):")
+                return
+            
+            product = next((p for p in PRODUCTS if p["code"] == code), None)
+            if product:
+                product['threshold'] = threshold
+                save_products(PRODUCTS)
+                await update.message.reply_text(f"Порог для товара {product['short_name']} ({code}) обновлён: {threshold}")
+                logger.info(f"Обновлён порог для товара: {code}, Новый порог: {threshold}")
+            context.user_data.pop('admin_state', None)
+            context.user_data.pop('edit_product_code', None)
             await show_admin_panel(chat_id, context)
     
     except Exception as e:
@@ -183,23 +241,14 @@ def process_stock_file(context: ContextTypes.DEFAULT_TYPE = None):
             latest_file = context.user_data['stock_file_path']
             logger.info(f"Используется загруженный файл: {latest_file}")
         else:
-            # Иначе ищем файл в DOWNLOAD_DIR
-            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.xlsx') and not f.startswith('~$')]
-            if not files:
-                raise FileNotFoundError("Файл остатков (.xlsx) не найден в папке.")
-            
-            latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getmtime)
-            logger.info(f"Используется файл из DOWNLOAD_DIR: {latest_file}")
-
+            raise FileNotFoundError("Файл остатков (.xlsx) не найден. Пожалуйста, загрузите файл через Telegram.")
+        
         file_time = datetime.datetime.fromtimestamp(os.path.getmtime(latest_file))
         current_time = datetime.datetime.now()
         time_difference = (current_time - file_time).total_seconds() / 3600
         
         if time_difference > 24:
             raise ValueError(f"Файл остатков устарел (дата: {file_time.strftime('%Y-%m-%d %H:%M')}). Загрузите актуальный файл.")
-        
-        if not context and len(files) > 1:
-            logger.warning(f"Найдено несколько файлов: {files}. Используется: {latest_file}")
         
         df = pd.read_excel(latest_file, header=3)
         if "Код товара" not in df.columns or "Наименование карточки товара" not in df.columns or "Количество (1 регистр)" not in df.columns:
@@ -242,7 +291,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['state'] = 'waiting_for_file'
 
     await update.message.reply_text(
-        "Привет! Я бот для сверки остатков.\n"
+        "Здравствуйте! Я бот для сверки остатков.\n"
         "Пожалуйста, отправьте файл остатков в формате .xlsx, чтобы начать процесс."
     )
 
@@ -288,6 +337,61 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в history_command: {e}", exc_info=True)
         await context.bot.send_message(update.effective_chat.id, f"Ошибка: {e}")
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.chat.type != 'private':
+        return
+
+    # Проверяем, что отправлен документ
+    if not update.message.document:
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
+        return
+
+    # Проверяем, что файл имеет расширение .xlsx
+    file_name = update.message.document.file_name
+    if not file_name.endswith('.xlsx'):
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
+        return
+
+    try:
+        # Скачиваем файл
+        file = await update.message.document.get_file()
+        temp_file_path = f"/tmp/{file_name}"  # Временный путь на сервере
+        await file.download_to_drive(temp_file_path)
+        logger.info(f"Файл {file_name} скачан в {temp_file_path}")
+
+        # Сохраняем путь к файлу в context.user_data
+        context.user_data['stock_file_path'] = temp_file_path
+
+        # Запускаем процесс сверки
+        context.user_data['actual_stocks'] = {}
+        context.user_data['product_index'] = 0
+        context.user_data['state'] = 'ready_check'
+
+        file_time = datetime.datetime.fromtimestamp(os.path.getmtime(temp_file_path))
+        intro_text = (
+            "Привет! Файл остатков получен.\n"
+            "Я буду запрашивать фактические остатки для каждого товара по очереди.\n"
+            "Отвечайте числом остатка для каждого товара.\n"
+            f"Используется файл: {file_name} (дата: {file_time.strftime('%Y-%m-%d %H:%M')})"
+        )
+        await update.message.reply_text(intro_text)
+
+        keyboard = [
+            [InlineKeyboardButton("Да", callback_data='ready_yes'), InlineKeyboardButton("Нет", callback_data='ready_no')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(update.effective_chat.id, "Готовы ли для подсчёта фактических остатков?", reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке файла: {e}")
+        await update.message.reply_text(f"Ошибка при обработке файла: {str(e)}")
+        if 'stock_file_path' in context.user_data:
+            try:
+                os.remove(context.user_data['stock_file_path'])
+            except:
+                pass
+            context.user_data.pop('stock_file_path', None)
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -401,19 +505,63 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка ввода: {e}", exc_info=True)
         await context.bot.send_message(update.effective_chat.id, f"Ошибка: {e}. Попробуйте снова.")
 
+# Функция для отправки сводки остатков и расхождений в группу
+async def send_stock_summary(context: ContextTypes.DEFAULT_TYPE, products: list, actual_stocks: dict, system_stocks: dict, discrepancies: list):
+    try:
+        # Формируем список всех товаров
+        all_items_message = "📋 Сводка остатков:\n"
+        for product in products:
+            code = product["code"]
+            name = product["short_name"]
+            threshold = product.get("threshold", 10)
+            actual_stock = actual_stocks.get(code, 0)
+            
+            # Формируем строку для товара
+            item_line = f"{name}: {actual_stock}"
+            if actual_stock == 0:
+                item_line += " ❌"
+            elif actual_stock < threshold:
+                item_line += " ⚠️"
+            all_items_message += f"{item_line}\n"
+        
+        # Формируем список расхождений, если они есть
+        discrepancies_message = ""
+        if discrepancies:
+            discrepancies_message = "\n🆘 Выявлены расхождения:\n"
+            for discrepancy in discrepancies:
+                # Разбираем строку расхождения: "Название (код): Факт = X, ЕГАИС = Y, Расхождение = Z"
+                parts = discrepancy.split(": ")
+                name_with_code = parts[0]  # "Название (код)"
+                name = name_with_code.split(" (")[0]  # Извлекаем название
+                details = parts[1].split(", ")  # ["Факт = X", "ЕГАИС = Y", "Расхождение = Z"]
+                actual = details[0].split(" = ")[1]  # X
+                egais = details[1].split(" = ")[1]  # Y
+                diff = details[2].split(" = ")[1]  # Z
+                discrepancies_message += f"{name}: ЕГАИС = {egais}, Факт = {actual}, Расхождение = {diff}\n"
+        
+        # Объединяем сообщение
+        full_message = all_items_message + discrepancies_message
+        
+        # Отправляем сообщение в группу
+        await context.bot.send_message(chat_id=NOTIFY_CHAT_ID, text=full_message)
+        logger.info("Сводка остатков отправлена в группу")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сводки остатков: {e}")
+
 async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     wait_msg = await context.bot.send_message(chat_id, "Идёт сверка остатков, пожалуйста, подождите...")
     
     try:
         today = datetime.datetime.now().strftime('%Y-%m-%d')
-        system_stocks = process_stock_file(context)  # Передаём context
+        system_stocks = process_stock_file(context)
         if not system_stocks:
             await context.bot.send_message(chat_id, "Ошибка обработки файла остатков. Проверьте файл и попробуйте снова.")
             return
         
         processed = 0
         discrepancies = []
+        
         for code in set(context.user_data['actual_stocks'].keys()) | set(system_stocks.keys()):
             actual_stock = context.user_data['actual_stocks'].get(code, 0)
             system_data = system_stocks.get(code, {"name": "", "quantity": 0})
@@ -424,6 +572,9 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             discrepancy = actual_stock - system_stock
             if discrepancy != 0:
                 discrepancies.append(f"{name} ({code}): Факт = {actual_stock}, ЕГАИС = {system_stock}, Расхождение = {discrepancy}")
+        
+        # Отправляем сводку остатков и расхождения
+        await send_stock_summary(context, PRODUCTS, context.user_data['actual_stocks'], system_stocks, discrepancies)
         
         context.user_data['system_stocks'] = system_stocks
         context.user_data['discrepancies'] = discrepancies
@@ -447,7 +598,6 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при сверке: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"Ошибка при сверке: {e}")
     finally:
-        # Удаляем временный файл после обработки
         if 'stock_file_path' in context.user_data:
             try:
                 os.remove(context.user_data['stock_file_path'])
@@ -543,7 +693,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info("Админ-панель должна быть отправлена")
             return
         
-        # Затем проверяем admin_ (add, remove, list)
+        # Затем проверяем admin_ (add, remove, list, edit_threshold)
         if data.startswith('admin_'):
             logger.info("Обработка admin_ callback")
             if not is_admin(update):
@@ -557,6 +707,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif data == 'admin_list':
                 await list_products(update, context)
                 await show_admin_panel(chat_id, context)
+            elif data == 'admin_edit_threshold':
+                await handle_edit_threshold(update, context)
             return
         
         if query.message.chat.type != 'private':
@@ -614,73 +766,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id, "Отправить остатки в группу?", reply_markup=reply_markup)
             context.user_data['state'] = 'send'
         elif data == 'send_yes':
-            discrepancies = context.user_data.get('discrepancies', [])
-            message_text = "Результаты сверки:\nОбработано товаров: {}\n".format(len(context.user_data['actual_stocks']))
-            if discrepancies:
-                message_text += "Расхождения:\n" + "\n".join(discrepancies)
-            else:
-                message_text += "Расхождений нет."
-            await context.bot.send_message(NOTIFY_CHAT_ID, message_text)
+            await send_stock_summary(context, PRODUCTS, context.user_data['actual_stocks'], context.user_data['system_stocks'], context.user_data.get('discrepancies', []))
             await context.bot.send_message(chat_id, "Остатки отправлены в группу.")
         elif data == 'send_no':
             await context.bot.send_message(chat_id, "Остатки не отправлены в группу.")
     except Exception as e:
         logger.error(f"Ошибка в button_handler: {e}", exc_info=True)
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message.chat.type != 'private':
-        return
-
-    # Проверяем, что отправлен документ
-    if not update.message.document:
-        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
-        return
-
-    # Проверяем, что файл имеет расширение .xlsx
-    file_name = update.message.document.file_name
-    if not file_name.endswith('.xlsx'):
-        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
-        return
-
-    try:
-        # Скачиваем файл
-        file = await update.message.document.get_file()
-        temp_file_path = f"/tmp/{file_name}"  # Временный путь на сервере
-        await file.download_to_drive(temp_file_path)
-        logger.info(f"Файл {file_name} скачан в {temp_file_path}")
-
-        # Сохраняем путь к файлу в context.user_data
-        context.user_data['stock_file_path'] = temp_file_path
-
-        # Запускаем процесс сверки
-        context.user_data['actual_stocks'] = {}
-        context.user_data['product_index'] = 0
-        context.user_data['state'] = 'ready_check'
-
-        file_time = datetime.datetime.fromtimestamp(os.path.getmtime(temp_file_path))
-        intro_text = (
-            "Привет! Файл остатков получен.\n"
-            "Я буду запрашивать фактические остатки для каждого товара по очереди.\n"
-            "Отвечайте числом остатка для каждого товара.\n"
-            f"Используется файл: {file_name} (дата: {file_time.strftime('%Y-%m-%d %H:%M')})"
-        )
-        await update.message.reply_text(intro_text)
-
-        keyboard = [
-            [InlineKeyboardButton("Да", callback_data='ready_yes'), InlineKeyboardButton("Нет", callback_data='ready_no')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(update.effective_chat.id, "Готовы ли для подсчёта фактических остатков?", reply_markup=reply_markup)
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text(f"Ошибка при обработке файла: {str(e)}")
-        if 'stock_file_path' in context.user_data:
-            try:
-                os.remove(context.user_data['stock_file_path'])
-            except:
-                pass
-            context.user_data.pop('stock_file_path', None)
 
 def main():
     application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
@@ -700,7 +791,6 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
     application.add_handler(CallbackQueryHandler(button_handler))
-    
     
     # Запускаем бота
     application.run_polling()
