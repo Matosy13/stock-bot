@@ -233,7 +233,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.xlsx') and not f.startswith('~$')]
     if not files:
-        await update.message.reply_text("Привет! Файл остатков не найден в папке. Добавьте его в C:\\Users\\Максим\\Documents\\Остатки ЕГАИС и попробуйте снова.")
+        await update.message.reply_text("Привет! Тест Файл остатков не найден в папке. Добавьте его в C:\\Users\\Максим\\Documents\\Остатки ЕГАИС и попробуйте снова.")
         return
     
     latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getmtime)
