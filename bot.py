@@ -22,8 +22,8 @@ NOTIFY_CHAT_ID = "-1002260669289"  # ID группы для уведомлени
 ADMIN_ID = int(os.getenv("ADMIN_ID"))  # ID администратора из .env
 PRODUCTS_FILE = "products.json"  # Файл для хранения списка продуктов
 
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+#if not os.path.exists(DOWNLOAD_DIR):
+#    os.makedirs(DOWNLOAD_DIR)
 
 sheet = setup_google_sheets()
 
@@ -176,13 +176,21 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop('admin_state', None)
         await show_admin_panel(chat_id, context)
 
-def process_stock_file():
+def process_stock_file(context: ContextTypes.DEFAULT_TYPE = None):
     try:
-        files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.xlsx') and not f.startswith('~$')]
-        if not files:
-            raise FileNotFoundError("Файл остатков (.xlsx) не найден в папке.")
-        
-        latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getmtime)
+        # Если файл был загружен через Telegram, используем его
+        if context and 'stock_file_path' in context.user_data:
+            latest_file = context.user_data['stock_file_path']
+            logger.info(f"Используется загруженный файл: {latest_file}")
+        else:
+            # Иначе ищем файл в DOWNLOAD_DIR
+            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.xlsx') and not f.startswith('~$')]
+            if not files:
+                raise FileNotFoundError("Файл остатков (.xlsx) не найден в папке.")
+            
+            latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getmtime)
+            logger.info(f"Используется файл из DOWNLOAD_DIR: {latest_file}")
+
         file_time = datetime.datetime.fromtimestamp(os.path.getmtime(latest_file))
         current_time = datetime.datetime.now()
         time_difference = (current_time - file_time).total_seconds() / 3600
@@ -190,7 +198,7 @@ def process_stock_file():
         if time_difference > 24:
             raise ValueError(f"Файл остатков устарел (дата: {file_time.strftime('%Y-%m-%d %H:%M')}). Загрузите актуальный файл.")
         
-        if len(files) > 1:
+        if not context and len(files) > 1:
             logger.warning(f"Найдено несколько файлов: {files}. Используется: {latest_file}")
         
         df = pd.read_excel(latest_file, header=3)
@@ -227,40 +235,16 @@ def update_sheet_row(sheet, date, code, product_name, actual_stock, egais_stock)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
         return
+    
+    # Очищаем предыдущие данные
     context.user_data['actual_stocks'] = {}
     context.user_data['product_index'] = 0
-    context.user_data['state'] = 'ready_check'
+    context.user_data['state'] = 'waiting_for_file'
 
-    files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.xlsx') and not f.startswith('~$')]
-    if not files:
-        await update.message.reply_text("Привет! Тест5 Файл остатков не найден в папке. Добавьте его в C:\\Users\\Максим\\Documents\\Остатки ЕГАИС и попробуйте снова.")
-        return
-    
-    latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getmtime)
-    file_time = datetime.datetime.fromtimestamp(os.path.getmtime(latest_file))
-    current_time = datetime.datetime.now()
-    time_difference = (current_time - file_time).total_seconds() / 3600
-    
-    if time_difference > 24:
-        await update.message.reply_text(f"Файл остатков устарел (дата: {file_time.strftime('%Y-%m-%d %H:%M')}). Пожалуйста, загрузите актуальный файл в C:\\Users\\Максим\\Documents\\Остатки ЕГАИС и попробуйте снова.")
-        return
-    
-    intro_text = (
+    await update.message.reply_text(
         "Привет! Я бот для сверки остатков.\n"
-        "Я буду запрашивать фактические остатки для каждого товара по очереди.\n"
-        "Отвечайте числом остатка для каждого товара.\n"
-        f"Используется файл: {os.path.basename(latest_file)} (дата: {file_time.strftime('%Y-%m-%d %H:%M')})"
+        "Пожалуйста, отправьте файл остатков в формате .xlsx, чтобы начать процесс."
     )
-    if len(files) > 1:
-        intro_text += f"\nВ папке несколько файлов. Используется самый свежий."
-    
-    await update.message.reply_text(intro_text)
-    
-    keyboard = [
-        [InlineKeyboardButton("Да", callback_data='ready_yes'), InlineKeyboardButton("Нет", callback_data='ready_no')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(update.effective_chat.id, "Готовы ли для подсчета фактических остатков?", reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -423,7 +407,7 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         today = datetime.datetime.now().strftime('%Y-%m-%d')
-        system_stocks = process_stock_file()
+        system_stocks = process_stock_file(context)  # Передаём context
         if not system_stocks:
             await context.bot.send_message(chat_id, "Ошибка обработки файла остатков. Проверьте файл и попробуйте снова.")
             return
@@ -462,6 +446,15 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при сверке: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"Ошибка при сверке: {e}")
+    finally:
+        # Удаляем временный файл после обработки
+        if 'stock_file_path' in context.user_data:
+            try:
+                os.remove(context.user_data['stock_file_path'])
+                logger.info(f"Временный файл {context.user_data['stock_file_path']} удалён")
+            except Exception as e:
+                logger.error(f"Ошибка при удалении временного файла: {e}")
+            context.user_data.pop('stock_file_path', None)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -634,6 +627,61 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в button_handler: {e}", exc_info=True)
 
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.chat.type != 'private':
+        return
+
+    # Проверяем, что отправлен документ
+    if not update.message.document:
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
+        return
+
+    # Проверяем, что файл имеет расширение .xlsx
+    file_name = update.message.document.file_name
+    if not file_name.endswith('.xlsx'):
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .xlsx.")
+        return
+
+    try:
+        # Скачиваем файл
+        file = await update.message.document.get_file()
+        temp_file_path = f"/tmp/{file_name}"  # Временный путь на сервере
+        await file.download_to_drive(temp_file_path)
+        logger.info(f"Файл {file_name} скачан в {temp_file_path}")
+
+        # Сохраняем путь к файлу в context.user_data
+        context.user_data['stock_file_path'] = temp_file_path
+
+        # Запускаем процесс сверки
+        context.user_data['actual_stocks'] = {}
+        context.user_data['product_index'] = 0
+        context.user_data['state'] = 'ready_check'
+
+        file_time = datetime.datetime.fromtimestamp(os.path.getmtime(temp_file_path))
+        intro_text = (
+            "Привет! Файл остатков получен.\n"
+            "Я буду запрашивать фактические остатки для каждого товара по очереди.\n"
+            "Отвечайте числом остатка для каждого товара.\n"
+            f"Используется файл: {file_name} (дата: {file_time.strftime('%Y-%m-%d %H:%M')})"
+        )
+        await update.message.reply_text(intro_text)
+
+        keyboard = [
+            [InlineKeyboardButton("Да", callback_data='ready_yes'), InlineKeyboardButton("Нет", callback_data='ready_no')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(update.effective_chat.id, "Готовы ли для подсчёта фактических остатков?", reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке файла: {e}")
+        await update.message.reply_text(f"Ошибка при обработке файла: {str(e)}")
+        if 'stock_file_path' in context.user_data:
+            try:
+                os.remove(context.user_data['stock_file_path'])
+            except:
+                pass
+            context.user_data.pop('stock_file_path', None)
+
 def main():
     application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     
@@ -649,8 +697,10 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
     application.add_handler(CallbackQueryHandler(button_handler))
+    
     
     # Запускаем бота
     application.run_polling()
