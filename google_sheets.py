@@ -1,39 +1,43 @@
-import os
-import json
-from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import logging
+from dotenv import load_dotenv
+import os
 
-# Загружаем переменные окружения из .env
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Загружаем переменные окружения
 load_dotenv()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
+# Настройка авторизации для Google Sheets
 def setup_google_sheets():
-    # Определяем scope для Google Sheets API
-    scope = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-    ]
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+        logger.info("Google Sheets успешно настроен")
+        return sheet
+    except Exception as e:
+        logger.error(f"Ошибка при настройке Google Sheets: {e}")
+        raise
 
-    with open('credentials.json', 'r') as file:
-        credentials_dict = json.load(file)
-
-    # Создаём учётные данные
-    creds = Credentials.from_service_account_info(
-        credentials_dict,
-        scopes=scope
-    )
-
-    # Авторизуемся в Google Sheets
-    client = gspread.authorize(creds)
-
-    # Открываем таблицу по её ключу
-    return client.open_by_key('1ETzy6vwdIBqXRohHSPT7XZ1joFyMpgxbtmpI16j_tnw').sheet1
-
-def add_to_sheet(sheet, data):
-    """
-    Добавляет данные в Google Sheets.
-    sheet: объект листа (возвращается из setup_google_sheets)
-    data: список значений для добавления (например, [дата, продукт, количество])
-    """
-    # Добавляем новую строку в таблицу
-    sheet.append_row(data)
+# Функция для добавления новой строки в Google Sheet
+def add_to_sheet(sheet, date, code, product_name, actual_stock, egais_stock):
+    try:
+        # Формируем данные для новой строки
+        discrepancy = actual_stock - egais_stock
+        row = [date, code, product_name, actual_stock, egais_stock, discrepancy]
+        
+        # Добавляем строку в Google Sheet
+        sheet.append_row(row)
+        logger.info(f"Добавлена новая строка в Google Sheets: {code} - {product_name}, Факт: {actual_stock}, ЕГАИС: {egais_stock}")
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении строки в Google Sheets: {e}")
+        raise
