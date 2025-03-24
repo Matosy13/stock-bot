@@ -573,9 +573,6 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if discrepancy != 0:
                 discrepancies.append(f"{name} ({code}): Факт = {actual_stock}, ЕГАИС = {system_stock}, Расхождение = {discrepancy}")
         
-        # Отправляем сводку остатков и расхождения
-        await send_stock_summary(context, PRODUCTS, context.user_data['actual_stocks'], system_stocks, discrepancies)
-        
         context.user_data['system_stocks'] = system_stocks
         context.user_data['discrepancies'] = discrepancies
         message_text = f"Сверка завершена. Обработано: {processed} товаров"
@@ -605,7 +602,7 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Ошибка при удалении временного файла: {e}")
             context.user_data.pop('stock_file_path', None)
-
+            
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
