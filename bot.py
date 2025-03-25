@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 load_dotenv()
-NOTIFY_CHAT_ID = "-1002260669289"  # ID группы для уведомлений
+NOTIFY_CHAT_ID = "-1002130385571"  # ID группы для уведомлений
 ADMIN_ID = int(os.getenv("ADMIN_ID"))  # ID администратора из .env
 PRODUCTS_FILE = "products.json"  # Файл для хранения списка продуктов
 
@@ -602,7 +602,7 @@ async def perform_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Ошибка при удалении временного файла: {e}")
             context.user_data.pop('stock_file_path', None)
-            
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
